@@ -23,8 +23,30 @@ const HUE_COLOR: Record<Hue, string> = { a: "#38bdf8", b: "#f59e0b" };
 const FIRST_SPAWN_DELAY_MS = 1200;
 const MOVE_SPEED = 340; // px/s, keyboard movement
 const MAX_DT = 0.05; // clamp so a backgrounded tab can't leap the sim forward
+const SHAKE_DURATION = 0.35;
+const SHAKE_MAGNITUDE = 10;
 
 const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+interface Particle {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  hue: Hue;
+  radius: number;
+  age: number;
+  maxAge: number;
+}
+
+interface Ring {
+  x: number;
+  y: number;
+  hue: Hue;
+  age: number;
+  maxAge: number;
+  maxRadius: number;
+}
 
 let width = 0;
 let height = 0;
@@ -39,6 +61,74 @@ let spawnTimer = FIRST_SPAWN_DELAY_MS;
 let lastTime: number | null = null;
 let draggingPointerId: number | null = null;
 const pressed = new Set<string>();
+let particles: Particle[] = [];
+let rings: Ring[] = [];
+let shakeTime = 0;
+let flashAlpha = 0;
+
+function hexToRgba(hex: string, alpha: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+// Decorative only: a player with prefers-reduced-motion gets the same
+// instant clear and flat game-over screen as before these effects existed,
+// same guard the swap-button pulse already uses below.
+function spawnMatchEffect(obstacle: Obstacle) {
+  if (prefersReducedMotion) return;
+  rings.push({
+    x: obstacle.x,
+    y: obstacle.y,
+    hue: obstacle.hue,
+    age: 0,
+    maxAge: 0.4,
+    maxRadius: obstacle.radius * 2.4,
+  });
+  spawnParticles(obstacle.x, obstacle.y, obstacle.hue, 10, 0.45, 130);
+}
+
+function spawnDeathEffect(x: number, y: number, hue: Hue) {
+  if (prefersReducedMotion) return;
+  spawnParticles(x, y, hue, 26, 0.7, 220);
+  shakeTime = SHAKE_DURATION;
+  flashAlpha = 0.55;
+}
+
+function spawnParticles(x: number, y: number, hue: Hue, count: number, maxAge: number, speed: number) {
+  for (let i = 0; i < count; i++) {
+    const angle = (Math.PI * 2 * i) / count + Math.random() * 0.6;
+    const velocity = speed * (0.5 + Math.random() * 0.5);
+    particles.push({
+      x,
+      y,
+      vx: Math.cos(angle) * velocity,
+      vy: Math.sin(angle) * velocity,
+      hue,
+      radius: 3 + Math.random() * 3,
+      age: 0,
+      maxAge,
+    });
+  }
+}
+
+function updateEffects(dt: number) {
+  for (const particle of particles) {
+    particle.age += dt;
+    particle.x += particle.vx * dt;
+    particle.y += particle.vy * dt;
+    particle.vx *= 0.94;
+    particle.vy *= 0.94;
+  }
+  particles = particles.filter((particle) => particle.age < particle.maxAge);
+
+  for (const ring of rings) ring.age += dt;
+  rings = rings.filter((ring) => ring.age < ring.maxAge);
+
+  if (shakeTime > 0) shakeTime = Math.max(0, shakeTime - dt);
+  if (flashAlpha > 0) flashAlpha = Math.max(0, flashAlpha - dt * 2.2);
+}
 
 function resize() {
   const rect = canvas.getBoundingClientRect();
@@ -77,6 +167,10 @@ function resetGame() {
   player.hue = "a";
   player.x = width / 2;
   announcer.textContent = "";
+  particles = [];
+  rings = [];
+  shakeTime = 0;
+  flashAlpha = 0;
 }
 
 function spawnObstacle() {
@@ -204,13 +298,14 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) releaseHeldInput();
 });
 
-function gameOver() {
+function gameOver(obstacle: Obstacle) {
   state = "gameover";
   // A collision mid-drag leaves the pointer still down with no pointerup to
   // clear it --- without this, pointermove keeps sliding the player under
   // the game-over overlay, found by forcing the collision mid-drag and
   // watching playerX keep tracking the pointer after the round had ended.
   draggingPointerId = null;
+  spawnDeathEffect(player.x, player.y, obstacle.hue);
   announcer.textContent = `Game over. Final score ${score}.`;
 }
 
@@ -234,12 +329,13 @@ function update(dt: number) {
     obstacle.y += speed * dt;
 
     if (isFatalCollision(player, obstacle)) {
-      gameOver();
+      gameOver(obstacle);
       survivors.push(obstacle);
       continue;
     }
     if (circlesOverlap(player, obstacle)) {
       matchedCount += 1;
+      spawnMatchEffect(obstacle);
       continue; // same-hue match: absorbed, removed from play
     }
     if (obstacle.y - obstacle.radius <= height) {
@@ -251,8 +347,35 @@ function update(dt: number) {
 }
 
 function draw() {
-  ctx.fillStyle = "#171b2e";
-  ctx.fillRect(0, 0, width, height);
+  const shakeStrength = shakeTime > 0 ? (shakeTime / SHAKE_DURATION) * SHAKE_MAGNITUDE : 0;
+  const shakeX = shakeStrength ? (Math.random() * 2 - 1) * shakeStrength : 0;
+  const shakeY = shakeStrength ? (Math.random() * 2 - 1) * shakeStrength : 0;
+
+  ctx.save();
+  ctx.translate(shakeX, shakeY);
+
+  // A low-alpha clear leaves a fading trail instead of a hard wipe; skipped
+  // under prefers-reduced-motion, where every frame gets a full flat clear
+  // exactly as before this effect existed.
+  ctx.fillStyle = prefersReducedMotion ? "#171b2e" : "rgba(23, 27, 46, 0.28)";
+  ctx.fillRect(-16, -16, width + 32, height + 32);
+
+  for (const ring of rings) {
+    const t = ring.age / ring.maxAge;
+    ctx.beginPath();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = hexToRgba(HUE_COLOR[ring.hue], 1 - t);
+    ctx.arc(ring.x, ring.y, ring.maxRadius * t, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  for (const particle of particles) {
+    const t = particle.age / particle.maxAge;
+    ctx.beginPath();
+    ctx.fillStyle = hexToRgba(HUE_COLOR[particle.hue], 1 - t);
+    ctx.arc(particle.x, particle.y, particle.radius * (1 - t * 0.5), 0, Math.PI * 2);
+    ctx.fill();
+  }
 
   for (const obstacle of obstacles) {
     ctx.beginPath();
@@ -278,6 +401,13 @@ function draw() {
   ctx.strokeStyle = "#f5f5f7";
   ctx.stroke();
   ctx.setLineDash([]);
+
+  ctx.restore();
+
+  if (flashAlpha > 0) {
+    ctx.fillStyle = `rgba(245, 245, 247, ${flashAlpha})`;
+    ctx.fillRect(0, 0, width, height);
+  }
 
   ctx.fillStyle = "#f5f5f7";
   ctx.font = "16px system-ui, sans-serif";
@@ -305,6 +435,7 @@ function loop(timestamp: number) {
   if (state === "playing") {
     update(dt);
   }
+  updateEffects(dt);
   draw();
   requestAnimationFrame(loop);
 }
