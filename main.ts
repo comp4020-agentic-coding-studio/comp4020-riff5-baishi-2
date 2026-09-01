@@ -26,6 +26,48 @@ const MAX_DT = 0.05; // clamp so a backgrounded tab can't leap the sim forward
 const SHAKE_DURATION = 0.35;
 const SHAKE_MAGNITUDE = 10;
 
+// Escalating milestones at a run's 5th/10th match, then every 20 after —
+// deliberately in the same two hues as everything else rather than a
+// rainbow, so the CVD-safe palette chosen for the core mechanic (see
+// HUE_COLOR below) stays the only palette in play.
+interface StreakTier {
+  rings: number;
+  particles: number;
+  shakeDuration: number;
+  shakeMagnitude: number;
+  flash: number;
+  glow: number;
+  label: string;
+}
+function streakTier(count: number): StreakTier | null {
+  if (count === 5) {
+    return { rings: 2, particles: 24, shakeDuration: 0.2, shakeMagnitude: 4, flash: 0.28, glow: 0, label: "5x" };
+  }
+  if (count === 10) {
+    return {
+      rings: 3,
+      particles: 44,
+      shakeDuration: 0.3,
+      shakeMagnitude: 7,
+      flash: 0.42,
+      glow: 1.4,
+      label: "10x!",
+    };
+  }
+  if (count >= 20 && count % 20 === 0) {
+    return {
+      rings: 5,
+      particles: 70,
+      shakeDuration: 0.45,
+      shakeMagnitude: 12,
+      flash: 0.6,
+      glow: 2.6,
+      label: `${count}x STREAK!`,
+    };
+  }
+  return null;
+}
+
 const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 interface Particle {
@@ -46,6 +88,14 @@ interface Ring {
   age: number;
   maxAge: number;
   maxRadius: number;
+  lineWidth?: number;
+}
+
+interface Milestone {
+  text: string;
+  hue: Hue;
+  age: number;
+  maxAge: number;
 }
 
 let width = 0;
@@ -64,7 +114,11 @@ const pressed = new Set<string>();
 let particles: Particle[] = [];
 let rings: Ring[] = [];
 let shakeTime = 0;
+let shakeMaxTime = SHAKE_DURATION;
+let shakeMagnitude = SHAKE_MAGNITUDE;
 let flashAlpha = 0;
+let milestone: Milestone | null = null;
+let playerGlowTime = 0;
 
 function hexToRgba(hex: string, alpha: number): string {
   const r = parseInt(hex.slice(1, 3), 16);
@@ -92,8 +146,44 @@ function spawnMatchEffect(obstacle: Obstacle) {
 function spawnDeathEffect(x: number, y: number, hue: Hue) {
   if (prefersReducedMotion) return;
   spawnParticles(x, y, hue, 26, 0.7, 220);
-  shakeTime = SHAKE_DURATION;
+  triggerShake(SHAKE_DURATION, SHAKE_MAGNITUDE);
   flashAlpha = 0.55;
+}
+
+function triggerShake(duration: number, magnitude: number) {
+  shakeTime = duration;
+  shakeMaxTime = duration;
+  shakeMagnitude = magnitude;
+}
+
+// A milestone match (5th, 10th, then every 20th) layers a bigger, two-hue
+// version of the ordinary match effect on top of it: concentric rings
+// instead of one, particles in both hues instead of one, a stronger
+// shake/flash, and — from the 10-streak on — a pulsing aura around the
+// player that lingers after the burst fades.
+function spawnStreakEffect(count: number, x: number, y: number, hue: Hue) {
+  if (prefersReducedMotion) return;
+  const tier = streakTier(count);
+  if (!tier) return;
+
+  for (let i = 0; i < tier.rings; i++) {
+    rings.push({
+      x,
+      y,
+      hue: i % 2 === 0 ? "a" : "b",
+      age: 0,
+      maxAge: 0.5 + i * 0.15,
+      maxRadius: 60 + i * 50 + count,
+      lineWidth: Math.max(1.5, 4 - i * 0.5),
+    });
+  }
+  spawnParticles(x, y, "a", Math.ceil(tier.particles / 2), 0.8, 260);
+  spawnParticles(x, y, "b", Math.floor(tier.particles / 2), 0.8, 260);
+
+  triggerShake(tier.shakeDuration, tier.shakeMagnitude);
+  flashAlpha = Math.max(flashAlpha, tier.flash);
+  playerGlowTime = Math.max(playerGlowTime, tier.glow);
+  milestone = { text: tier.label, hue, age: 0, maxAge: 1.1 };
 }
 
 function spawnParticles(x: number, y: number, hue: Hue, count: number, maxAge: number, speed: number) {
@@ -128,6 +218,12 @@ function updateEffects(dt: number) {
 
   if (shakeTime > 0) shakeTime = Math.max(0, shakeTime - dt);
   if (flashAlpha > 0) flashAlpha = Math.max(0, flashAlpha - dt * 2.2);
+  if (playerGlowTime > 0) playerGlowTime = Math.max(0, playerGlowTime - dt);
+
+  if (milestone) {
+    milestone.age += dt;
+    if (milestone.age >= milestone.maxAge) milestone = null;
+  }
 }
 
 function resize() {
@@ -171,6 +267,8 @@ function resetGame() {
   rings = [];
   shakeTime = 0;
   flashAlpha = 0;
+  milestone = null;
+  playerGlowTime = 0;
 }
 
 function spawnObstacle() {
@@ -336,6 +434,7 @@ function update(dt: number) {
     if (circlesOverlap(player, obstacle)) {
       matchedCount += 1;
       spawnMatchEffect(obstacle);
+      spawnStreakEffect(matchedCount, obstacle.x, obstacle.y, obstacle.hue);
       continue; // same-hue match: absorbed, removed from play
     }
     if (obstacle.y - obstacle.radius <= height) {
@@ -347,7 +446,7 @@ function update(dt: number) {
 }
 
 function draw() {
-  const shakeStrength = shakeTime > 0 ? (shakeTime / SHAKE_DURATION) * SHAKE_MAGNITUDE : 0;
+  const shakeStrength = shakeTime > 0 ? (shakeTime / shakeMaxTime) * shakeMagnitude : 0;
   const shakeX = shakeStrength ? (Math.random() * 2 - 1) * shakeStrength : 0;
   const shakeY = shakeStrength ? (Math.random() * 2 - 1) * shakeStrength : 0;
 
@@ -363,7 +462,7 @@ function draw() {
   for (const ring of rings) {
     const t = ring.age / ring.maxAge;
     ctx.beginPath();
-    ctx.lineWidth = 3;
+    ctx.lineWidth = ring.lineWidth ?? 3;
     ctx.strokeStyle = hexToRgba(HUE_COLOR[ring.hue], 1 - t);
     ctx.arc(ring.x, ring.y, ring.maxRadius * t, 0, Math.PI * 2);
     ctx.stroke();
@@ -382,6 +481,16 @@ function draw() {
     ctx.fillStyle = HUE_COLOR[obstacle.hue];
     ctx.arc(obstacle.x, obstacle.y, obstacle.radius, 0, Math.PI * 2);
     ctx.fill();
+  }
+
+  if (playerGlowTime > 0) {
+    const glowAlpha = Math.min(1, playerGlowTime / 1.4) * 0.5;
+    const glowRadius = player.radius + 8 + Math.sin(elapsedSeconds * 6) * 3;
+    ctx.beginPath();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = hexToRgba(HUE_COLOR[otherHue(player.hue)], glowAlpha);
+    ctx.arc(player.x, player.y, glowRadius, 0, Math.PI * 2);
+    ctx.stroke();
   }
 
   ctx.beginPath();
@@ -407,6 +516,23 @@ function draw() {
   if (flashAlpha > 0) {
     ctx.fillStyle = `rgba(245, 245, 247, ${flashAlpha})`;
     ctx.fillRect(0, 0, width, height);
+  }
+
+  if (milestone) {
+    const t = milestone.age / milestone.maxAge;
+    // Quick pop in (first 15% of the lifetime), lingering hold, slow fade —
+    // the scale-down-from-1.6x sells the "pop" more than a fade-in alone.
+    const introT = Math.min(t / 0.15, 1);
+    const alpha = t < 0.15 ? introT : 1 - (t - 0.15) / 0.85;
+    const scale = 1 + (1 - introT) * 0.6;
+    ctx.save();
+    ctx.translate(width / 2, height / 2 - 40);
+    ctx.scale(scale, scale);
+    ctx.textAlign = "center";
+    ctx.font = "bold 40px system-ui, sans-serif";
+    ctx.fillStyle = hexToRgba(HUE_COLOR[milestone.hue], Math.max(0, Math.min(1, alpha)));
+    ctx.fillText(milestone.text, 0, 0);
+    ctx.restore();
   }
 
   ctx.fillStyle = "#f5f5f7";
