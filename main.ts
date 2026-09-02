@@ -36,6 +36,15 @@ const DECAY_INTERVAL = 0.4;
 const DECAY_AMOUNT = 3;
 const SCORE_FLASH_DURATION = 0.3;
 
+// Persisted across runs so a streak's payoff outlives the tab it was earned
+// in — the decay/milestone system above only made a single run legible, not
+// whether this run was better than the last one.
+const BEST_SCORE_KEY = "two-tone-best-score";
+function loadBestScore(): number {
+  const raw = Number(localStorage.getItem(BEST_SCORE_KEY));
+  return Number.isFinite(raw) && raw > 0 ? raw : 0;
+}
+
 // Escalating milestones at a run's 5th/10th match, then every 20 after —
 // deliberately in the same two hues as everything else rather than a
 // rainbow, so the CVD-safe palette chosen for the core mechanic (see
@@ -142,6 +151,8 @@ let decayTimer = 0;
 let scorePopups: ScorePopup[] = [];
 let scoreFlashTime = 0;
 let scoreFlashSign: 1 | -1 = 1;
+let bestScore = loadBestScore();
+let isNewBest = false;
 
 function hexToRgba(hex: string, alpha: number): string {
   const r = parseInt(hex.slice(1, 3), 16);
@@ -318,6 +329,7 @@ function resetGame() {
   decayTimer = 0;
   scorePopups = [];
   scoreFlashTime = 0;
+  isNewBest = false;
 }
 
 function spawnObstacle() {
@@ -453,7 +465,14 @@ function gameOver(obstacle: Obstacle) {
   // watching playerX keep tracking the pointer after the round had ended.
   draggingPointerId = null;
   spawnDeathEffect(player.x, player.y, obstacle.hue);
-  announcer.textContent = `Game over. Final score ${score}.`;
+  isNewBest = score > bestScore;
+  if (isNewBest) {
+    bestScore = score;
+    localStorage.setItem(BEST_SCORE_KEY, String(bestScore));
+  }
+  announcer.textContent = isNewBest
+    ? `Game over. Final score ${score}. New best!`
+    : `Game over. Final score ${score}. Best ${bestScore}.`;
 }
 
 function update(dt: number) {
@@ -622,6 +641,10 @@ function draw() {
     ctx.fillText(popup.text, 12 + scoreWidth + 18 + popup.offsetX, 24 - t * 30);
   }
 
+  ctx.font = "13px system-ui, sans-serif";
+  ctx.fillStyle = "#8b90a8";
+  ctx.fillText(`Best: ${bestScore}`, 12, 44);
+
   if (state === "gameover") {
     ctx.fillStyle = "rgba(15, 18, 32, 0.75)";
     ctx.fillRect(0, 0, width, height);
@@ -631,7 +654,18 @@ function draw() {
     ctx.fillText("Game over", width / 2, height / 2 - 16);
     ctx.font = "18px system-ui, sans-serif";
     ctx.fillText(`Score: ${score}`, width / 2, height / 2 + 16);
-    ctx.fillText("↻", width / 2, height / 2 + 56);
+    if (isNewBest) {
+      ctx.fillStyle = HUE_COLOR[player.hue];
+      ctx.font = "bold 16px system-ui, sans-serif";
+      ctx.fillText("New best!", width / 2, height / 2 + 40);
+    } else {
+      ctx.fillStyle = "#8b90a8";
+      ctx.font = "16px system-ui, sans-serif";
+      ctx.fillText(`Best: ${bestScore}`, width / 2, height / 2 + 40);
+    }
+    ctx.fillStyle = "#f5f5f7";
+    ctx.font = "18px system-ui, sans-serif";
+    ctx.fillText("↻", width / 2, height / 2 + 72);
     ctx.textAlign = "left";
   }
 }
