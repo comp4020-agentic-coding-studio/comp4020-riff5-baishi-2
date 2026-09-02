@@ -125,6 +125,30 @@ interface ScorePopup {
   maxAge: number;
 }
 
+interface Star {
+  x: number;
+  y: number;
+  radius: number;
+  speed: number;
+  alpha: number;
+}
+
+// The base clear color drifts from the resting navy toward a deeper violet
+// as a run goes on, echoing the fall-speed ramp in game-logic.ts without
+// touching the two foreground hues the CVD choice above depends on.
+const BACKGROUND_FROM: [number, number, number] = [23, 27, 46];
+const BACKGROUND_TO: [number, number, number] = [36, 21, 54];
+const BACKGROUND_RAMP_SECONDS = 90;
+
+function backgroundColor(elapsed: number): [number, number, number] {
+  const t = Math.min(elapsed / BACKGROUND_RAMP_SECONDS, 1);
+  return [0, 1, 2].map((i) => BACKGROUND_FROM[i] + (BACKGROUND_TO[i] - BACKGROUND_FROM[i]) * t) as [
+    number,
+    number,
+    number,
+  ];
+}
+
 let width = 0;
 let height = 0;
 let player: Player;
@@ -153,6 +177,8 @@ let scoreFlashTime = 0;
 let scoreFlashSign: 1 | -1 = 1;
 let bestScore = loadBestScore();
 let isNewBest = false;
+let stars: Star[] = [];
+let vignette: CanvasGradient | null = null;
 
 function hexToRgba(hex: string, alpha: number): string {
   const r = parseInt(hex.slice(1, 3), 16);
@@ -255,6 +281,16 @@ function spawnParticles(x: number, y: number, hue: Hue, count: number, maxAge: n
 }
 
 function updateEffects(dt: number) {
+  if (!prefersReducedMotion) {
+    for (const star of stars) {
+      star.y += star.speed * dt;
+      if (star.y > height) {
+        star.y = -2;
+        star.x = Math.random() * width;
+      }
+    }
+  }
+
   for (const particle of particles) {
     particle.age += dt;
     particle.x += particle.vx * dt;
@@ -282,6 +318,17 @@ function updateEffects(dt: number) {
   if (scoreFlashTime > 0) scoreFlashTime = Math.max(0, scoreFlashTime - dt);
 }
 
+function initStars() {
+  const count = Math.round((width * height) / 9000);
+  stars = Array.from({ length: count }, () => ({
+    x: Math.random() * width,
+    y: Math.random() * height,
+    radius: Math.random() * 1.3 + 0.4,
+    speed: 8 + Math.random() * 18,
+    alpha: 0.15 + Math.random() * 0.35,
+  }));
+}
+
 function resize() {
   const rect = canvas.getBoundingClientRect();
   width = rect.width;
@@ -290,6 +337,21 @@ function resize() {
   canvas.width = Math.round(width * dpr);
   canvas.height = Math.round(height * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  initStars();
+  // A soft dark ring at the edges gives the play field depth without
+  // touching either foreground hue; cached here since width/height only
+  // change on resize, not every frame.
+  vignette = ctx.createRadialGradient(
+    width / 2,
+    height / 2,
+    Math.min(width, height) * 0.4,
+    width / 2,
+    height / 2,
+    Math.max(width, height) * 0.75,
+  );
+  vignette.addColorStop(0, "rgba(0, 0, 0, 0)");
+  vignette.addColorStop(1, "rgba(0, 0, 0, 0.45)");
 
   const radius = clamp(width * 0.045, 14, 24);
   if (!player) {
@@ -537,9 +599,20 @@ function draw() {
 
   // A low-alpha clear leaves a fading trail instead of a hard wipe; skipped
   // under prefers-reduced-motion, where every frame gets a full flat clear
-  // exactly as before this effect existed.
-  ctx.fillStyle = prefersReducedMotion ? "#171b2e" : "rgba(23, 27, 46, 0.28)";
+  // exactly as before this effect existed. The base color itself drifts
+  // toward violet as the run goes on (see backgroundColor above).
+  const [bgR, bgG, bgB] = backgroundColor(elapsedSeconds);
+  ctx.fillStyle = prefersReducedMotion
+    ? `rgb(${bgR}, ${bgG}, ${bgB})`
+    : `rgba(${bgR}, ${bgG}, ${bgB}, 0.28)`;
   ctx.fillRect(-16, -16, width + 32, height + 32);
+
+  for (const star of stars) {
+    ctx.beginPath();
+    ctx.fillStyle = `rgba(245, 245, 247, ${star.alpha})`;
+    ctx.arc(star.x, star.y, star.radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
 
   for (const ring of rings) {
     const t = ring.age / ring.maxAge;
@@ -594,6 +667,11 @@ function draw() {
   ctx.setLineDash([]);
 
   ctx.restore();
+
+  if (vignette) {
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0, 0, width, height);
+  }
 
   if (flashAlpha > 0) {
     ctx.fillStyle = `rgba(245, 245, 247, ${flashAlpha})`;
