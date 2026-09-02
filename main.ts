@@ -199,6 +199,88 @@ function orbFill(x: number, y: number, radius: number, hue: Hue): CanvasGradient
   return gradient;
 }
 
+// Synthesized rather than sourced from audio files, so the game stays a
+// couple of TypeScript modules with no binary assets to license or fetch.
+// The AudioContext is created lazily on the first pointerdown/keydown,
+// since browsers block audio until a user gesture; mute is a plain click
+// toggle, persisted so it survives a refresh.
+const MUTED_KEY = "two-tone-muted";
+let audioCtx: AudioContext | null = null;
+let muted = localStorage.getItem(MUTED_KEY) === "1";
+let muteButton: { x: number; y: number; radius: number };
+
+function ensureAudio() {
+  if (audioCtx) {
+    if (audioCtx.state === "suspended") void audioCtx.resume();
+    return;
+  }
+  const AudioContextClass = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+  audioCtx = new AudioContextClass();
+}
+
+function toggleMute() {
+  muted = !muted;
+  localStorage.setItem(MUTED_KEY, muted ? "1" : "0");
+}
+
+function withinMuteButton(x: number, y: number): boolean {
+  const dx = x - muteButton.x;
+  const dy = y - muteButton.y;
+  return dx * dx + dy * dy < (muteButton.radius + 10) ** 2;
+}
+
+function playTone(
+  freq: number,
+  duration: number,
+  options: { type?: OscillatorType; gain?: number; slideTo?: number; delay?: number } = {},
+) {
+  if (muted || !audioCtx) return;
+  const { type = "sine", gain = 0.14, slideTo, delay = 0 } = options;
+  const start = audioCtx.currentTime + delay;
+  const osc = audioCtx.createOscillator();
+  const gainNode = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, start);
+  if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, start + duration);
+  // Linear attack then exponential decay avoids the click a hard on/off
+  // edge makes on a raw oscillator.
+  gainNode.gain.setValueAtTime(0.0001, start);
+  gainNode.gain.linearRampToValueAtTime(gain, start + 0.012);
+  gainNode.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+  osc.connect(gainNode);
+  gainNode.connect(audioCtx.destination);
+  osc.start(start);
+  osc.stop(start + duration + 0.02);
+}
+
+// Pitch climbs a little with the streak so matching feels like it's
+// building toward something, capped so it doesn't screech at a long run.
+function playMatchSound(streak: number) {
+  playTone(420 + Math.min(streak, 24) * 9, 0.14, { type: "sine", gain: 0.13, slideTo: 620 });
+}
+
+function playDeathSound() {
+  playTone(200, 0.4, { type: "sawtooth", gain: 0.18, slideTo: 55 });
+}
+
+function playSwapSound() {
+  playTone(700, 0.05, { type: "square", gain: 0.05 });
+}
+
+// A short rising arpeggio, one extra note per tier, instead of a single
+// tone — gives the 20x milestone a bigger musical moment than the 5x one
+// without a separate sound design per tier.
+function playStreakSound(tierRings: number) {
+  const notes = [660, 880, 990, 1180, 1320];
+  for (let i = 0; i < Math.min(tierRings + 1, notes.length); i++) {
+    playTone(notes[i], 0.16, { type: "triangle", gain: 0.11, delay: i * 0.07 });
+  }
+}
+
+function playDecaySound() {
+  playTone(180, 0.09, { type: "sine", gain: 0.05, slideTo: 130 });
+}
+
 // Decorative only: a player with prefers-reduced-motion gets the same
 // instant clear and flat game-over screen as before these effects existed,
 // same guard the swap-button pulse already uses below.
@@ -234,9 +316,10 @@ function triggerShake(duration: number, magnitude: number) {
 // shake/flash, and — from the 10-streak on — a pulsing aura around the
 // player that lingers after the burst fades.
 function spawnStreakEffect(count: number, x: number, y: number, hue: Hue) {
-  if (prefersReducedMotion) return;
   const tier = streakTier(count);
   if (!tier) return;
+  playStreakSound(tier.rings);
+  if (prefersReducedMotion) return;
 
   for (let i = 0; i < tier.rings; i++) {
     rings.push({
@@ -377,6 +460,8 @@ function resize() {
   // swap button let a resize clamp the player right on top of it, muddling
   // which circle was "you" — found by playing at the mobile viewport.
   swapButton = { x: width - 34, y: 34, radius: 20 };
+  // Left of the swap button with a clear gap between the two hit targets.
+  muteButton = { x: width - 76, y: 34, radius: 13 };
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -430,13 +515,21 @@ function withinSwapButton(x: number, y: number): boolean {
 
 canvas.addEventListener("pointerdown", (event) => {
   canvas.focus();
+  ensureAudio();
+  const { x, y } = pointFromEvent(event);
+  // Checked before the gameover branch below so muting on the game-over
+  // screen toggles sound instead of restarting the round.
+  if (withinMuteButton(x, y)) {
+    toggleMute();
+    return;
+  }
   if (state === "gameover") {
     resetGame();
     return;
   }
-  const { x, y } = pointFromEvent(event);
   if (withinSwapButton(x, y)) {
     player.hue = otherHue(player.hue);
+    playSwapSound();
     return;
   }
   // Keyed by pointerId, not a shared flag: an incidental second touch (a
@@ -486,6 +579,14 @@ window.addEventListener("keydown", (event) => {
   ) {
     event.preventDefault();
   }
+  ensureAudio();
+  // Checked before the gameover branch below, same reasoning as the mute
+  // button's pointerdown check: muting mid-game-over shouldn't restart it.
+  if (event.key === "m" || event.key === "M") {
+    if (event.repeat) return;
+    toggleMute();
+    return;
+  }
   if (state === "gameover") {
     // A key held down at the moment of a fatal collision --- the likely case,
     // since dying usually happens mid-dodge --- keeps sending repeat keydowns
@@ -509,6 +610,7 @@ window.addEventListener("keydown", (event) => {
     // restart above.
     if (event.repeat) return;
     player.hue = otherHue(player.hue);
+    playSwapSound();
   }
 });
 
@@ -539,6 +641,7 @@ function gameOver(obstacle: Obstacle) {
   // watching playerX keep tracking the pointer after the round had ended.
   draggingPointerId = null;
   spawnDeathEffect(player.x, player.y, obstacle.hue);
+  playDeathSound();
   isNewBest = score > bestScore;
   if (isNewBest) {
     bestScore = score;
@@ -580,6 +683,7 @@ function update(dt: number) {
       decayTimer = 0;
       spawnScorePopup(MATCH_SCORE_GAIN, obstacle.hue);
       spawnMatchEffect(obstacle);
+      playMatchSound(matchedCount);
       spawnStreakEffect(matchedCount, obstacle.x, obstacle.y, obstacle.hue);
       continue; // same-hue match: absorbed, removed from play
     }
@@ -597,6 +701,7 @@ function update(dt: number) {
       const amount = Math.min(DECAY_AMOUNT, score);
       score -= amount;
       spawnScorePopup(-amount);
+      playDecaySound();
     }
   }
 }
@@ -696,6 +801,14 @@ function draw() {
     ctx.fillStyle = vignette;
     ctx.fillRect(0, 0, width, height);
   }
+
+  // Drawn in screen space, outside the shake transform above, so muting
+  // mid-shake doesn't make the hit target jump around under the cursor.
+  ctx.textAlign = "center";
+  ctx.font = "16px system-ui, sans-serif";
+  ctx.fillStyle = "rgba(245, 245, 247, 0.85)";
+  ctx.fillText(muted ? "🔇" : "🔊", muteButton.x, muteButton.y + 6);
+  ctx.textAlign = "left";
 
   if (flashAlpha > 0) {
     ctx.fillStyle = `rgba(245, 245, 247, ${flashAlpha})`;
