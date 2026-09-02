@@ -26,6 +26,16 @@ const MAX_DT = 0.05; // clamp so a backgrounded tab can't leap the sim forward
 const SHAKE_DURATION = 0.35;
 const SHAKE_MAGNITUDE = 10;
 
+// Score only moves on a match — no more passive time-based trickle. Go
+// quiet for STARVE_GRACE_SECONDS and it starts bleeding DECAY_AMOUNT every
+// DECAY_INTERVAL until the next match resets the clock, so coasting between
+// obstacles costs you instead of paying for itself.
+const MATCH_SCORE_GAIN = 15;
+const STARVE_GRACE_SECONDS = 2.5;
+const DECAY_INTERVAL = 0.4;
+const DECAY_AMOUNT = 3;
+const SCORE_FLASH_DURATION = 0.3;
+
 // Escalating milestones at a run's 5th/10th match, then every 20 after —
 // deliberately in the same two hues as everything else rather than a
 // rainbow, so the CVD-safe palette chosen for the core mechanic (see
@@ -98,6 +108,14 @@ interface Milestone {
   maxAge: number;
 }
 
+interface ScorePopup {
+  text: string;
+  color: string;
+  offsetX: number;
+  age: number;
+  maxAge: number;
+}
+
 let width = 0;
 let height = 0;
 let player: Player;
@@ -119,6 +137,11 @@ let shakeMagnitude = SHAKE_MAGNITUDE;
 let flashAlpha = 0;
 let milestone: Milestone | null = null;
 let playerGlowTime = 0;
+let timeSinceMatch = 0;
+let decayTimer = 0;
+let scorePopups: ScorePopup[] = [];
+let scoreFlashTime = 0;
+let scoreFlashSign: 1 | -1 = 1;
 
 function hexToRgba(hex: string, alpha: number): string {
   const r = parseInt(hex.slice(1, 3), 16);
@@ -186,6 +209,23 @@ function spawnStreakEffect(count: number, x: number, y: number, hue: Hue) {
   milestone = { text: tier.label, hue, age: 0, maxAge: 1.1 };
 }
 
+// A gain popup is colored by the obstacle just eaten, tying it back to the
+// hue that earned it; a loss popup stays neutral grey rather than reaching
+// for red, since red/green is exactly the axis the CVD palette above was
+// chosen to avoid.
+function spawnScorePopup(amount: number, hue?: Hue) {
+  scoreFlashTime = SCORE_FLASH_DURATION;
+  scoreFlashSign = amount > 0 ? 1 : -1;
+  if (prefersReducedMotion) return;
+  scorePopups.push({
+    text: amount > 0 ? `+${amount}` : `${amount}`,
+    color: hue ? HUE_COLOR[hue] : "#8b90a8",
+    offsetX: Math.random() * 10 - 5,
+    age: 0,
+    maxAge: 0.9,
+  });
+}
+
 function spawnParticles(x: number, y: number, hue: Hue, count: number, maxAge: number, speed: number) {
   for (let i = 0; i < count; i++) {
     const angle = (Math.PI * 2 * i) / count + Math.random() * 0.6;
@@ -224,6 +264,11 @@ function updateEffects(dt: number) {
     milestone.age += dt;
     if (milestone.age >= milestone.maxAge) milestone = null;
   }
+
+  for (const popup of scorePopups) popup.age += dt;
+  scorePopups = scorePopups.filter((popup) => popup.age < popup.maxAge);
+
+  if (scoreFlashTime > 0) scoreFlashTime = Math.max(0, scoreFlashTime - dt);
 }
 
 function resize() {
@@ -269,6 +314,10 @@ function resetGame() {
   flashAlpha = 0;
   milestone = null;
   playerGlowTime = 0;
+  timeSinceMatch = 0;
+  decayTimer = 0;
+  scorePopups = [];
+  scoreFlashTime = 0;
 }
 
 function spawnObstacle() {
@@ -433,6 +482,10 @@ function update(dt: number) {
     }
     if (circlesOverlap(player, obstacle)) {
       matchedCount += 1;
+      score += MATCH_SCORE_GAIN;
+      timeSinceMatch = 0;
+      decayTimer = 0;
+      spawnScorePopup(MATCH_SCORE_GAIN, obstacle.hue);
       spawnMatchEffect(obstacle);
       spawnStreakEffect(matchedCount, obstacle.x, obstacle.y, obstacle.hue);
       continue; // same-hue match: absorbed, removed from play
@@ -442,7 +495,17 @@ function update(dt: number) {
     }
   }
   obstacles = survivors;
-  score = Math.floor(elapsedSeconds * 10) + matchedCount * 15;
+
+  timeSinceMatch += dt;
+  if (timeSinceMatch > STARVE_GRACE_SECONDS && score > 0) {
+    decayTimer += dt;
+    while (decayTimer >= DECAY_INTERVAL && score > 0) {
+      decayTimer -= DECAY_INTERVAL;
+      const amount = Math.min(DECAY_AMOUNT, score);
+      score -= amount;
+      spawnScorePopup(-amount);
+    }
+  }
 }
 
 function draw() {
@@ -535,9 +598,29 @@ function draw() {
     ctx.restore();
   }
 
-  ctx.fillStyle = "#f5f5f7";
+  // A gain pops the score text white and slightly larger; a loss dims it
+  // toward grey instead of red, for the same red/green reason a loss popup
+  // stays grey below rather than reaching for a "danger" color.
+  const scoreFlashT = scoreFlashTime / SCORE_FLASH_DURATION;
+  const scoreScale = prefersReducedMotion ? 1 : 1 + scoreFlashT * 0.35;
+  const scoreColor = scoreFlashTime > 0 ? (scoreFlashSign > 0 ? "#ffffff" : "#8b90a8") : "#f5f5f7";
   ctx.font = "16px system-ui, sans-serif";
-  ctx.fillText(`Score: ${score}`, 12, 24);
+  const scoreText = `Score: ${score}`;
+  const scoreWidth = ctx.measureText(scoreText).width;
+  ctx.save();
+  ctx.translate(12, 24);
+  ctx.scale(scoreScale, scoreScale);
+  ctx.fillStyle = scoreColor;
+  ctx.textAlign = "left";
+  ctx.fillText(scoreText, 0, 0);
+  ctx.restore();
+
+  for (const popup of scorePopups) {
+    const t = popup.age / popup.maxAge;
+    ctx.fillStyle = hexToRgba(popup.color, 1 - t);
+    ctx.font = "bold 15px system-ui, sans-serif";
+    ctx.fillText(popup.text, 12 + scoreWidth + 18 + popup.offsetX, 24 - t * 30);
+  }
 
   if (state === "gameover") {
     ctx.fillStyle = "rgba(15, 18, 32, 0.75)";
