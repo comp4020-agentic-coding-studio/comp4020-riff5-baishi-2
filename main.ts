@@ -187,6 +187,18 @@ function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+// A radial gradient with an off-center hot spot reads as a lit orb instead
+// of a flat swatch, without changing the hue itself — the CVD contrast the
+// palette above was chosen for survives since the gradient stays within the
+// same hue at every stop.
+function orbFill(x: number, y: number, radius: number, hue: Hue): CanvasGradient {
+  const gradient = ctx.createRadialGradient(x - radius * 0.3, y - radius * 0.35, radius * 0.05, x, y, radius);
+  gradient.addColorStop(0, hexToRgba("#ffffff", 0.6));
+  gradient.addColorStop(0.45, HUE_COLOR[hue]);
+  gradient.addColorStop(1, hexToRgba(HUE_COLOR[hue], 0.85));
+  return gradient;
+}
+
 // Decorative only: a player with prefers-reduced-motion gets the same
 // instant clear and flat game-over screen as before these effects existed,
 // same guard the swap-button pulse already uses below.
@@ -632,10 +644,14 @@ function draw() {
   }
 
   for (const obstacle of obstacles) {
+    ctx.save();
+    ctx.shadowColor = HUE_COLOR[obstacle.hue];
+    ctx.shadowBlur = obstacle.radius * 0.8;
     ctx.beginPath();
-    ctx.fillStyle = HUE_COLOR[obstacle.hue];
+    ctx.fillStyle = orbFill(obstacle.x, obstacle.y, obstacle.radius, obstacle.hue);
     ctx.arc(obstacle.x, obstacle.y, obstacle.radius, 0, Math.PI * 2);
     ctx.fill();
+    ctx.restore();
   }
 
   if (playerGlowTime > 0) {
@@ -648,19 +664,27 @@ function draw() {
     ctx.stroke();
   }
 
+  ctx.save();
+  ctx.shadowColor = HUE_COLOR[player.hue];
+  ctx.shadowBlur = player.radius * 0.9;
   ctx.beginPath();
-  ctx.fillStyle = HUE_COLOR[player.hue];
+  ctx.fillStyle = orbFill(player.x, player.y, player.radius, player.hue);
   ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
   ctx.fill();
+  ctx.restore();
   ctx.lineWidth = 2;
   ctx.strokeStyle = "#f5f5f7";
   ctx.stroke();
 
   const pulse = prefersReducedMotion ? 0 : Math.sin(elapsedSeconds * 4) * 2;
+  ctx.save();
+  ctx.shadowColor = HUE_COLOR[otherHue(player.hue)];
+  ctx.shadowBlur = 10;
   ctx.beginPath();
-  ctx.fillStyle = HUE_COLOR[otherHue(player.hue)];
+  ctx.fillStyle = orbFill(swapButton.x, swapButton.y, swapButton.radius + pulse, otherHue(player.hue));
   ctx.arc(swapButton.x, swapButton.y, swapButton.radius + pulse, 0, Math.PI * 2);
   ctx.fill();
+  ctx.restore();
   ctx.setLineDash([4, 4]);
   ctx.strokeStyle = "#f5f5f7";
   ctx.stroke();
